@@ -135,19 +135,26 @@ export default function IntakeForm() {
     rec.interimResults = true;
     rec.lang = speechLang;
 
+    let baseText = dictationText;
+
     rec.onresult = (event) => {
+      let interimTranscript = '';
       let finalTranscript = '';
+
       for (let i = event.resultIndex; i < event.results.length; ++i) {
+        const transcript = event.results[i][0].transcript;
         if (event.results[i].isFinal) {
-          finalTranscript += event.results[i][0].transcript;
+          finalTranscript += transcript;
+        } else {
+          interimTranscript += transcript;
         }
       }
+
       if (finalTranscript) {
-        setDictationText((prev) => {
-          const space = prev.endsWith(' ') || prev === '' ? '' : ' ';
-          return prev + space + finalTranscript;
-        });
+        baseText = (baseText + ' ' + finalTranscript).trim().replace(/\s+/g, ' ');
       }
+
+      setDictationText((baseText + ' ' + interimTranscript).trim().replace(/\s+/g, ' '));
     };
 
     rec.onerror = (event) => {

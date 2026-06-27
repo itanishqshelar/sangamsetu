@@ -60,6 +60,7 @@ export default function OperationsMap({
   const popupRef = useRef(null);
   const [enabledLayers, setEnabledLayers] = useState(defaultLayers);
   const [isLegendExpanded, setIsLegendExpanded] = useState(true);
+  const [mapLoaded, setMapLoaded] = useState(false);
 
   const mapboxToken = import.meta.env.VITE_MAPBOX_ACCESS_TOKEN;
 
@@ -192,11 +193,12 @@ export default function OperationsMap({
     map.addControl(new mapboxgl.NavigationControl(), 'top-right');
 
     map.on('load', () => {
-      addOrUpdateSource(map, 'zones-source', toFeatureCollection(zoneFeatures));
-      addOrUpdateSource(map, 'chokepoints-source', toFeatureCollection(chokepointFeatures));
-      addOrUpdateSource(map, 'cctv-source', toFeatureCollection(cctvFeatures));
-      addOrUpdateSource(map, 'police-source', toFeatureCollection(policeFeatures));
-      addOrUpdateSource(map, 'reports-source', toFeatureCollection(reportFeatures));
+      // Initialize sources with empty data
+      map.addSource('zones-source', { type: 'geojson', data: toFeatureCollection([]) });
+      map.addSource('chokepoints-source', { type: 'geojson', data: toFeatureCollection([]) });
+      map.addSource('cctv-source', { type: 'geojson', data: toFeatureCollection([]) });
+      map.addSource('police-source', { type: 'geojson', data: toFeatureCollection([]) });
+      map.addSource('reports-source', { type: 'geojson', data: toFeatureCollection([]) });
 
       // 1. Zones
       map.addLayer({
@@ -308,6 +310,8 @@ export default function OperationsMap({
       Object.values(layerConfig).forEach((config) => {
         bindPopup(map, config.layerId, popupRef);
       });
+
+      setMapLoaded(true);
     });
 
     const resizeObserver = new ResizeObserver(() => {
@@ -323,12 +327,13 @@ export default function OperationsMap({
       popupRef.current?.remove();
       map.remove();
       mapRef.current = null;
+      setMapLoaded(false);
     };
   }, [mapboxToken]);
 
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !map.isStyleLoaded()) {
+    if (!map || !mapLoaded) {
       return;
     }
 
@@ -337,11 +342,11 @@ export default function OperationsMap({
     addOrUpdateSource(map, 'cctv-source', toFeatureCollection(cctvFeatures));
     addOrUpdateSource(map, 'police-source', toFeatureCollection(policeFeatures));
     addOrUpdateSource(map, 'reports-source', toFeatureCollection(reportFeatures));
-  }, [zoneFeatures, chokepointFeatures, cctvFeatures, policeFeatures, reportFeatures]);
+  }, [mapLoaded, zoneFeatures, chokepointFeatures, cctvFeatures, policeFeatures, reportFeatures]);
 
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !map.isStyleLoaded()) {
+    if (!map || !mapLoaded) {
       return;
     }
 
@@ -359,7 +364,7 @@ export default function OperationsMap({
         map.setLayoutProperty('reports-missing-halo', 'visibility', isVisible ? 'visible' : 'none');
       }
     });
-  }, [enabledLayers]);
+  }, [mapLoaded, enabledLayers]);
 
   if (!mapboxToken) {
     return (
