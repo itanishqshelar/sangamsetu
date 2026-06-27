@@ -49,6 +49,15 @@ export default function IntakeForm() {
   const [isSearchingMissing, setIsSearchingMissing] = useState(false);
   const [selectedMissingPerson, setSelectedMissingPerson] = useState(null);
 
+  // AI Voice and auto-fill states
+  const [isListening, setIsListening] = useState(false);
+  const [dictationText, setDictationText] = useState('');
+  const [speechLang, setSpeechLang] = useState('hi-IN');
+  const [isAiProcessing, setIsAiProcessing] = useState(false);
+  const [aiError, setAiError] = useState('');
+  const [highlightedFields, setHighlightedFields] = useState([]);
+  const recognitionRef = useRef(null);
+
   useEffect(() => {
     if (formData.report_type !== 'found' || missingSearchTerm.trim().length < 2) {
       setMissingSearchResults([]);
@@ -104,6 +113,163 @@ export default function IntakeForm() {
     loadLocations();
     return () => { isMounted = false; };
   }, []);
+
+  // Cleanup speech recognition on unmount
+  useEffect(() => {
+    return () => {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
+    };
+  }, []);
+
+  const startListening = () => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      alert('Speech recognition is not supported in this browser. Try Chrome or Edge.');
+      return;
+    }
+
+    const rec = new SpeechRecognition();
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.lang = speechLang;
+
+    rec.onresult = (event) => {
+      let finalTranscript = '';
+      for (let i = event.resultIndex; i < event.results.length; ++i) {
+        if (event.results[i].isFinal) {
+          finalTranscript += event.results[i][0].transcript;
+        }
+      }
+      if (finalTranscript) {
+        setDictationText((prev) => {
+          const space = prev.endsWith(' ') || prev === '' ? '' : ' ';
+          return prev + space + finalTranscript;
+        });
+      }
+    };
+
+    rec.onerror = (event) => {
+      console.error('Speech recognition error:', event);
+      if (event.error !== 'no-speech') {
+        setAiError(`Voice recognition: ${event.error}`);
+        setIsListening(false);
+      }
+    };
+
+    rec.onend = () => {
+      setIsListening(false);
+    };
+
+    recognitionRef.current = rec;
+    rec.start();
+    setIsListening(true);
+  };
+
+  const stopListening = () => {
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
+    }
+    setIsListening(false);
+  };
+
+  const toggleListening = () => {
+    if (isListening) {
+      stopListening();
+    } else {
+      startListening();
+    }
+  };
+
+  const handleAiAutoFill = async () => {
+    const apiKey = import.meta.env.VITE_GROQ_API_KEY;
+    if (!apiKey || apiKey === 'your-groq-api-key') {
+      setAiError('Groq API Key is missing. Please configure VITE_GROQ_API_KEY in your .env file.');
+      return;
+    }
+    if (!dictationText.trim()) {
+      setAiError('Please enter or dictate some text first.');
+      return;
+    }
+
+    setIsAiProcessing(true);
+    setAiError('');
+
+    try {
+      const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: 'llama-3.1-8b-instant',
+          messages: [
+            {
+              role: 'system',
+              content: `You are an AI assistant for SangamSetu, a missing and found person locator app at Kumbh Mela.
+Analyze the user's voice dictation/text description of a missing or found person, and extract the details as a JSON object.
+
+The allowed locations list is:
+${JSON.stringify(locations)}
+
+The output MUST be a JSON object with these EXACT keys:
+{
+  "name": string or null (extract name if mentioned, e.g., "Ramesh" or "Rahul"),
+  "gender": "Male" | "Female" | "Unknown" | null (map to one of these three exact strings),
+  "age_band": "0-12" | "13-17" | "18-40" | "41-60" | "61-70" | "71-80" | "80+" | null (map to the best fitting band),
+  "language": string or null (primary language spoken, e.g., "Hindi", "Marathi", "English", "Tamil"),
+  "last_seen_location": string or null (MUST match one of the allowed locations in the list exactly, e.g. "Ramkund Ghat". If not mentioned or not in the list, return null),
+  "reporter_mobile": string or null (extract 10-digit mobile number if mentioned),
+  "physical_description": string or null (extract details about clothing, height, hair, physical markings),
+  "remarks": string or null (any additional context or comments)
+}
+
+Do not include any explanation or additional text outside of the JSON object. Return ONLY the JSON object.`
+            },
+            {
+              role: 'user',
+              content: dictationText,
+            }
+          ],
+          response_format: { type: 'json_object' }
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Groq API returned status ${response.status}`);
+      }
+
+      const result = await response.json();
+      const parsedData = JSON.parse(result.choices[0].message.content);
+
+      // Apply parsed fields to form
+      const updatedFields = [];
+      setFormData((prev) => {
+        const next = { ...prev };
+        Object.keys(parsedData).forEach((key) => {
+          if (parsedData[key] !== undefined && parsedData[key] !== null) {
+            next[key] = parsedData[key];
+            updatedFields.push(key);
+          }
+        });
+        return next;
+      });
+
+      // Highlight fields that were auto-filled
+      setHighlightedFields(updatedFields);
+      setTimeout(() => {
+        setHighlightedFields([]);
+      }, 4000);
+
+    } catch (err) {
+      console.error(err);
+      setAiError(err.message || 'Failed to analyze text with AI.');
+    } finally {
+      setIsAiProcessing(false);
+    }
+  };
 
   function handleChange(event) {
     const { name, value } = event.target;
@@ -467,6 +633,102 @@ export default function IntakeForm() {
           </>
         )}
 
+        {/* AI Voice & Text Assistant */}
+        {!selectedMissingPerson && (
+          <div className="rounded-3xl border border-violet-100 bg-violet-50/40 p-5 space-y-4 shadow-sm backdrop-blur-sm">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-bold text-violet-900 flex items-center gap-2">
+                <span className="relative flex h-2 w-2" style={{ display: isListening ? 'inline-flex' : 'none' }}>
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500"></span>
+                </span>
+                {isListening ? '🎙️ Listening (Speak now)...' : '✨ AI Voice Auto-Fill'}
+              </span>
+              
+              <select 
+                value={speechLang} 
+                onChange={(e) => setSpeechLang(e.target.value)}
+                className="rounded-xl border border-violet-200 bg-white px-3 py-1.5 text-xs font-semibold text-violet-800 outline-none shadow-sm focus:border-violet-500"
+              >
+                <option value="hi-IN">Hindi (हिन्दी)</option>
+                <option value="en-IN">English (India)</option>
+              </select>
+            </div>
+
+            <p className="text-xs leading-relaxed text-violet-700">
+              Describe the person in English or Hindi (e.g. <i>"Rahul, a 10 year old boy speaking Hindi, missing from Ramkund Ghat, wearing a green t-shirt..."</i>) and AI will extract details instantly!
+            </p>
+
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={toggleListening}
+                className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl transition shadow-sm ${
+                  isListening 
+                    ? 'bg-rose-500 text-white animate-pulse' 
+                    : 'bg-violet-600 text-white hover:bg-violet-700 hover:shadow-md'
+                }`}
+                title={isListening ? 'Stop recording' : 'Start voice dictation'}
+              >
+                {isListening ? (
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="h-5 w-5">
+                    <path fillRule="evenodd" d="M4.5 7.5a3 3 0 013-3h9a3 3 0 013 3v9a3 3 0 01-3 3h-9a3 3 0 01-3-3v-9z" clipRule="evenodd" />
+                  </svg>
+                ) : (
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="h-5.5 w-5.5">
+                    <path d="M12 2a3 3 0 00-3 3v7a3 3 0 006 0V5a3 3 0 00-3-3z" />
+                    <path d="M19 10a1 1 0 00-1 1v1a7 7 0 01-14 0v-1a1 1 0 00-2 0v1a9 9 0 008 8.94V21a1 1 0 102 0v-2.06A9 9 0 0022 12v-1a1 1 0 00-1-1z" />
+                  </svg>
+                )}
+              </button>
+
+              <textarea
+                value={dictationText}
+                onChange={(e) => setDictationText(e.target.value)}
+                placeholder={isListening ? 'Listening and transcribing...' : 'Or type the description here to auto-fill...'}
+                className="input flex-1 min-h-[44px] max-h-[120px] py-2.5 px-3 border-violet-200 text-sm focus:border-violet-500 focus:ring-violet-200"
+                rows={1}
+              />
+            </div>
+
+            <div className="flex items-center justify-between gap-4 pt-1">
+              {aiError ? (
+                <span className="text-xs font-semibold text-rose-600">{aiError}</span>
+              ) : (
+                <span className="text-[11px] text-slate-400">
+                  {!(import.meta.env.VITE_GROQ_API_KEY) || import.meta.env.VITE_GROQ_API_KEY === 'your-groq-api-key' 
+                    ? '⚠️ Groq Key missing in .env' 
+                    : '⚡ Groq Engine active'}
+                </span>
+              )}
+
+              <button
+                type="button"
+                onClick={handleAiAutoFill}
+                disabled={isAiProcessing || !dictationText.trim()}
+                className="flex items-center gap-2 rounded-2xl bg-violet-600 px-5 py-2.5 text-xs font-bold text-white transition hover:bg-violet-750 hover:shadow-md disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
+              >
+                {isAiProcessing ? (
+                  <>
+                    <svg className="h-3 w-3 animate-spin text-white" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                    </svg>
+                    Extracting...
+                  </>
+                ) : (
+                  <>
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-3.5 w-3.5">
+                      <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" />
+                    </svg>
+                    Auto-Fill Fields
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Core form fields */}
         {!selectedMissingPerson && (
           <div className="grid gap-4">
@@ -476,7 +738,11 @@ export default function IntakeForm() {
                 value={formData.name}
                 onChange={handleChange}
                 placeholder="Optional if unknown"
-                className="input"
+                className={`input transition-all duration-300 ${
+                  highlightedFields.includes('name')
+                    ? 'ring-2 ring-emerald-500 border-emerald-500 bg-emerald-50/50 scale-[1.01]'
+                    : ''
+                }`}
               />
             </Field>
 
@@ -486,12 +752,25 @@ export default function IntakeForm() {
                 value={formData.language}
                 onChange={handleChange}
                 placeholder="Hindi, Marathi, Tamil..."
-                className="input"
+                className={`input transition-all duration-300 ${
+                  highlightedFields.includes('language')
+                    ? 'ring-2 ring-emerald-500 border-emerald-500 bg-emerald-50/50 scale-[1.01]'
+                    : ''
+                }`}
               />
             </Field>
 
             <Field label="Gender" required>
-              <select name="gender" value={formData.gender} onChange={handleChange} className="input">
+              <select 
+                name="gender" 
+                value={formData.gender} 
+                onChange={handleChange} 
+                className={`input transition-all duration-300 ${
+                  highlightedFields.includes('gender')
+                    ? 'ring-2 ring-emerald-500 border-emerald-500 bg-emerald-50/50 scale-[1.01]'
+                    : ''
+                }`}
+              >
                 <option value="">Select gender</option>
                 {genders.map((gender) => (
                   <option key={gender} value={gender}>{gender}</option>
@@ -500,7 +779,16 @@ export default function IntakeForm() {
             </Field>
 
             <Field label="Age band" required>
-              <select name="age_band" value={formData.age_band} onChange={handleChange} className="input">
+              <select 
+                name="age_band" 
+                value={formData.age_band} 
+                onChange={handleChange} 
+                className={`input transition-all duration-300 ${
+                  highlightedFields.includes('age_band')
+                    ? 'ring-2 ring-emerald-500 border-emerald-500 bg-emerald-50/50 scale-[1.01]'
+                    : ''
+                }`}
+              >
                 <option value="">Select age band</option>
                 {ageBands.map((band) => (
                   <option key={band} value={band}>{band}</option>
@@ -515,7 +803,11 @@ export default function IntakeForm() {
                   value={formData.reporter_mobile}
                   onChange={handleChange}
                   placeholder="Optional contact number"
-                  className="input"
+                  className={`input transition-all duration-300 ${
+                    highlightedFields.includes('reporter_mobile')
+                      ? 'ring-2 ring-emerald-500 border-emerald-500 bg-emerald-50/50 scale-[1.01]'
+                      : ''
+                  }`}
                 />
               </Field>
             )}
@@ -527,7 +819,11 @@ export default function IntakeForm() {
                 onChange={handleChange}
                 placeholder="Clothing, approximate height, identifying marks..."
                 rows={4}
-                className="input min-h-28 resize-y"
+                className={`input min-h-28 resize-y transition-all duration-300 ${
+                  highlightedFields.includes('physical_description')
+                    ? 'ring-2 ring-emerald-500 border-emerald-500 bg-emerald-50/50 scale-[1.01]'
+                    : ''
+                }`}
               />
             </Field>
           </div>
@@ -538,7 +834,11 @@ export default function IntakeForm() {
             name="last_seen_location"
             value={formData.last_seen_location}
             onChange={handleChange}
-            className="input"
+            className={`input transition-all duration-300 ${
+              highlightedFields.includes('last_seen_location')
+                ? 'ring-2 ring-emerald-500 border-emerald-500 bg-emerald-50/50 scale-[1.01]'
+                : ''
+            }`}
             disabled={isLoading}
           >
             <option value="">{isLoading ? 'Loading locations...' : 'Select location'}</option>
@@ -559,7 +859,11 @@ export default function IntakeForm() {
             onChange={handleChange}
             placeholder="Any extra context from the operator"
             rows={3}
-            className="input min-h-24 resize-y"
+            className={`input min-h-24 resize-y transition-all duration-300 ${
+              highlightedFields.includes('remarks')
+                ? 'ring-2 ring-emerald-500 border-emerald-500 bg-emerald-50/50 scale-[1.01]'
+                : ''
+            }`}
           />
         </Field>
 
